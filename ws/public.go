@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	wsUrl = "wss://wss.woo.org/ws/stream/%s"
+	publicWsUrl = "wss://wss.woo.org/ws/stream/%s"
 
 	writeWait         = time.Second * 10
 	reconnectCount    = int(10)
@@ -34,12 +34,55 @@ type PublicStream struct {
 func NewPublicStream(applicationId string) *PublicStream {
 	return &PublicStream{
 		appId:                  applicationId,
-		url:                    fmt.Sprintf(wsUrl, applicationId),
+		url:                    fmt.Sprintf(publicWsUrl, applicationId),
 		dialer:                 websocket.DefaultDialer,
 		wsReconnectionCount:    reconnectCount,
 		wsReconnectionInterval: reconnectInterval,
 		wsTimeout:              streamTimeout,
+
+		isDebugMode: true,
 	}
+}
+
+func (s *PublicStream) SubOrderBook(ctx context.Context, is100 bool, symbols ...string) (<-chan OrderbookEvent, error) {
+	requests := []WSRequest{}
+
+	topic := "orderbook"
+	if is100 {
+		topic += "100"
+	}
+
+	for _, sym := range symbols {
+		requests = append(requests, WSRequest{
+			ID:    fmt.Sprintf("%d", time.Now().UTC().UnixNano()),
+			Event: "subscribe",
+			Topic: fmt.Sprintf("%s@%s", sym, topic),
+		})
+	}
+
+	eventsC, err := serve[OrderbookEvent](ctx, s, requests...)
+
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	events := make(chan OrderbookEvent, 1)
+	go func() {
+		defer close(events)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-eventsC:
+				if !ok {
+					return
+				}
+				events <- event
+			}
+		}
+	}()
+
+	return events, nil
 }
 
 func (s *PublicStream) SubBestBookOffer(ctx context.Context, symbols ...string) (<-chan BestBookOfferEvent, error) {
@@ -60,6 +103,146 @@ func (s *PublicStream) SubBestBookOffer(ctx context.Context, symbols ...string) 
 	}
 
 	events := make(chan BestBookOfferEvent, 1)
+	go func() {
+		defer close(events)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-eventsC:
+				if !ok {
+					return
+				}
+				events <- event
+			}
+		}
+	}()
+
+	return events, nil
+}
+
+func (s *PublicStream) SubBestBooksOffers(ctx context.Context) (<-chan BestBooksOffersEvent, error) {
+	requests := []WSRequest{}
+
+	requests = append(requests, WSRequest{
+		ID:    fmt.Sprintf("%d", time.Now().UTC().UnixNano()),
+		Event: "subscribe",
+		Topic: "bbos",
+	})
+
+	eventsC, err := serve[BestBooksOffersEvent](ctx, s, requests...)
+
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	events := make(chan BestBooksOffersEvent, 1)
+	go func() {
+		defer close(events)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-eventsC:
+				if !ok {
+					return
+				}
+				events <- event
+			}
+		}
+	}()
+
+	return events, nil
+}
+
+func (s *PublicStream) SubTrade(ctx context.Context, symbols ...string) (<-chan TradeEvent, error) {
+	requests := []WSRequest{}
+
+	for _, sym := range symbols {
+		requests = append(requests, WSRequest{
+			ID:    fmt.Sprintf("%d", time.Now().UTC().UnixNano()),
+			Event: "subscribe",
+			Topic: fmt.Sprintf("%s@trade", sym),
+		})
+	}
+
+	eventsC, err := serve[TradeEvent](ctx, s, requests...)
+
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	events := make(chan TradeEvent, 1)
+	go func() {
+		defer close(events)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-eventsC:
+				if !ok {
+					return
+				}
+				events <- event
+			}
+		}
+	}()
+
+	return events, nil
+}
+
+func (s *PublicStream) SubOpenInterest(ctx context.Context) (<-chan OpenInterestEvent, error) {
+	requests := []WSRequest{}
+
+	requests = append(requests, WSRequest{
+		ID:    fmt.Sprintf("%d", time.Now().UTC().UnixNano()),
+		Event: "subscribe",
+		Topic: "openinterests",
+	})
+
+	eventsC, err := serve[OpenInterestEvent](ctx, s, requests...)
+
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	events := make(chan OpenInterestEvent, 1)
+	go func() {
+		defer close(events)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-eventsC:
+				if !ok {
+					return
+				}
+				events <- event
+			}
+		}
+	}()
+
+	return events, nil
+}
+
+func (s *PublicStream) SubEstFundingRate(ctx context.Context, symbols ...string) (<-chan EstFundingRateEvent, error) {
+	requests := []WSRequest{}
+
+	for _, sym := range symbols {
+		requests = append(requests, WSRequest{
+			ID:    fmt.Sprintf("%d", time.Now().UTC().UnixNano()),
+			Event: "subscribe",
+			Topic: fmt.Sprintf("%s@estfundingrate", sym),
+		})
+	}
+
+	eventsC, err := serve[EstFundingRateEvent](ctx, s, requests...)
+
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	events := make(chan EstFundingRateEvent, 1)
 	go func() {
 		defer close(events)
 		for {
@@ -100,7 +283,10 @@ func (s *PublicStream) connect(requests ...WSRequest) (*websocket.Conn, error) {
 
 	conn.SetPongHandler(func(msg string) error {
 		s.printf("%s", "PONG")
-		conn.SetReadDeadline(time.Now().Add(s.wsTimeout))
+		err := conn.SetReadDeadline(time.Now().Add(s.wsTimeout))
+		if err != nil {
+			return err
+		}
 		return nil
 	})
 
@@ -132,9 +318,13 @@ func serve[T WSEventI](ctx context.Context, s *PublicStream, requests ...WSReque
 
 				if err != nil {
 					s.printf("read msg: %v", err)
-					if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-						return
-					}
+
+					/*
+						if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+							return
+						}
+					*/
+
 					conn, err = s.reconnect(ctx, requests)
 					if err != nil {
 						s.printf("reconnect: %+v", err)
@@ -167,7 +357,7 @@ func serve[T WSEventI](ctx context.Context, s *PublicStream, requests ...WSReque
 				}
 			case <-doneC:
 				return
-			case <-time.After((s.wsTimeout * 9) / 10):
+			case <-time.After(time.Second * 9):
 				s.printf("%s", "PING")
 				conn.SetWriteDeadline(time.Now().Add(writeWait))
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
